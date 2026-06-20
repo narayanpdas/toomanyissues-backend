@@ -32,5 +32,8 @@ build/
 
 ### VS Code ###
 .vscode/
-
+*.cmd
+/logs/
+*.json
+mvnw
 *.properties
