@@ -19,7 +19,8 @@ target/
 *.iml
 *.ipr
 *.properties
-
+docker-compose.yml
+Dockerfile
 ### NetBeans ###
 /nbproject/private/
 /nbbuild/
@@ -36,4 +37,3 @@ build/
 /logs/
 *.json
 mvnw
-*.properties
