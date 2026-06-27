@@ -1,4 +1,4 @@
-# 🚀 Too Many Issues - Core API & Ingestion Engine
+# 🚀 <u>Too Many Issues - Core API & Ingestion Engine</u>
 
 > The enterprise-grade Spring Boot backend powering **[Too Many Issues](https://toomanyissues.vercel.app)**.
 > Designed to ingest, index, and summarize real-time GitHub issues across the open-source ecosystem without hitting API rate limits.
@@ -9,12 +9,12 @@
 [![MongoDB](https://img.shields.io/badge/MongoDB-Atlas-47A248.svg)](https://mongodb.com)
 [![Redis](https://img.shields.io/badge/Redis-Distributed_Locks-red.svg)](https://redis.io)
 
-## 📌 Overview
+## 📌 <u>Overview</u>
 This repository contains the RESTful API and automated background workers for the Too Many Issues platform. Instead of simply wrapping the GitHub API, this system utilizes a custom scheduling algorithm, distributed caching, and a polyglot persistence layer to autonomously manage massive data ingestion and AI summarization at scale.
 
 ---
 
-## 🏗️ System Architecture & Engineering Highlights
+## 🏗️ <u>System Architecture & Engineering Highlights</u>
 
 ### 1. The Ingestion Engine (Dynamic Polling Algorithm)
 To index thousands of repositories without exhausting GitHub's API rate limits, I engineered a custom **"Thermostat" (Hot/Warm/Cold) polling algorithm**.
@@ -44,7 +44,7 @@ Implemented a deeply customized Spring Security filter chain ensuring robust, st
 
 ---
 
-## 💻 Tech Stack
+## 💻 <u>Tech Stack</u>
 
 * **Core:** Java 17, Spring Boot 3, Spring Data JPA, Spring Security
 * **Databases:** PostgreSQL (Relational), MongoDB (Document)
@@ -54,7 +54,38 @@ Implemented a deeply customized Spring Security filter chain ensuring robust, st
 
 ---
 
-## 🚀 Local Setup & Installation
+## 🚀<u>Local Setup & Installation</u>
+### **DOCKER SETUP (Recommended):** Want to just run and see everything in action in seconds
+**Prerequisites:** Docker
+
+**1. Make an .env file in your working dir and configure the following keys**
+```aiignore
+# Redis Setup
+REDIS_PASSWORD=local_dev_redis_password_123
+
+# PAT/API Tokens
+APP_GITHUBPAT=your_github_personal_access_token
+GEMINI_API_KEY=your_gemini_api_key
+
+# App Secrets
+APP_JWTSECRETKEY=your_super_secret_jwt_key_at_least_256_bits
+APP_JWTTOKENTIMEOUT=86400000
+INTERNAL_EXPORT_KEY=your_internal_export_sync_key
+APP_CORS_ALLOWED_ORIGINS=http://localhost:5173
+```
+**2. Run the following command in your working dir:**
+```aiignore
+curl -o docker-compose.yaml https://raw.githubusercontent.com/narayanpdas/toomanyissues-backend/main/docker-compose.yaml
+docker compose up -d 
+```
+#### Check:
+**3. Run ``docker ps`` to check if the container is running.**
+
+**4. For streaming logs run ``docker logs -f toomanyissues-api``**
+
+#### 📔Note: If You want to connect custom database/server, make sure to change the corresponding environmental variables in the toomanyissues-docker-compose.yaml file.
+
+### **JVM SETUP:**  Want to run in an active development environment
 
 **Prerequisites:** Java 17, Maven, Docker (for Redis/DB instances)
 
@@ -67,36 +98,38 @@ cd toomanyissues-backend
 Create an application-dev.yml or .env file in the root directory and configure the following keys:
 
 ```aiignore
+# Database Connections
+SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5432/toomanyissues-postgres-db
+SPRING_DATASOURCE_USERNAME=admin
+SPRING_DATASOURCE_PASSWORD=password123
+SPRING_MONGODB_URI=mongodb://localhost:27017/githubIssues
 
-SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5432/toomanyissues
-SPRING_DATASOURCE_USERNAME=your_pg_user
-SPRING_DATASOURCE_PASSWORD=your_pg_pass
+# Redis Setup
+SPRING_DATA_REDIS_HOST=localhost
+SPRING_DATA_REDIS_PORT=6379
+SPRING_DATA_REDIS_PASSWORD=local_dev_redis_password_123
 
-SPRING_DATA_MONGODB_URI=mongodb+srv://...
-
-SPRING_REDIS_HOST=localhost
-SPRING_REDIS_PORT=6379
-
-app.JWTTokenTimeOut = Your access token length
-
-app.refreshTokenTimeout = Your refresh token length
-
-app.JWTSecretKey=your_secure_jwt_secret_key
+# PAT/API Tokens
+APP_GITHUBPAT=your_github_personal_access_token
 GEMINI_API_KEY=your_gemini_api_key
-app.githubPAT=your_github_personal_Access_token
-app.cors.allowed-origins=localhost or your frontend
+
+# App Secrets
+APP_JWTSECRETKEY=your_super_secret_jwt_key_at_least_256_bits
+APP_JWTTOKENTIMEOUT=86400000
+INTERNAL_EXPORT_KEY=your_internal_export_sync_key
+APP_CORS_ALLOWED_ORIGINS=http://localhost:5173
 ```
 
-**2. Run the Application:**
+**3. Run the Application:**
 ```
 mvn clean install
 mvn spring-boot:run
 ```
 The server will start on http://localhost:8080.
 
-# 📬 Contact & Live Platform
+# 📬 Live Platform & Contact
 Live: https://toomanyissues.vercel.app
 
 Creator: Narayan
 
-LinkedIn: [Narayan](https://www.linkedin.com/in/narayan-prasad-das-85257b249/)
+LinkedIn: [Linkedin-Profile](https://www.linkedin.com/in/narayan-prasad-das-85257b249/)

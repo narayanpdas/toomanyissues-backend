@@ -4,6 +4,8 @@ import com.toomanyissues.api.Model.GithubIssues;
 import com.toomanyissues.api.Model.ScrappedRepoInfo;
 import com.toomanyissues.api.Model.ScrapperMetrics;
 import com.toomanyissues.api.Service.BACKFILL.GithubRepoInfoScrapper;
+import com.toomanyissues.api.Service.DTOs.AiSummarizationDTOs.RepoReadmeDTO;
+import com.toomanyissues.api.Service.DTOs.AiSummarizationDTOs.SummarizationMetaData;
 import com.toomanyissues.api.repository.GithubIssuesRepository;
 
 import com.toomanyissues.api.repository.ScrappedRepoInfoRepository;
@@ -12,6 +14,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 
 @Service
@@ -54,47 +57,54 @@ public class AISummarizationService {
         if (issue.getSummary() != null && !issue.getSummary().isBlank()) {
             return issue.getSummary();
         }
-        ScrappedRepoInfo issueRepo = scrappedRepoInfoRepository.findByRepoName(issue.getRepoName());
-        if(issueRepo == null){
+        SummarizationMetaData issueRepo = scrappedRepoInfoRepository.findByRepoName(issue.getRepoName());
+        if (issueRepo == null) {
             return null;
         }
         String lockKey = "lock:generate:summary:" + issueId;
         Boolean acquiredLock = redisTemplate.opsForValue()
-                .setIfAbsent(lockKey, "LOCKED", Duration.ofSeconds(20));
-
+                .setIfAbsent(lockKey, "LOCKED", Duration.ofSeconds(60));
         if (Boolean.TRUE.equals(acquiredLock)) {
             try {
                 boolean quotaDeducted = userService.deductUserPoints(userName);
                 if (!quotaDeducted) {
                     throw new RuntimeException("Daily AI Quota Reached. Please try again tomorrow.");
                 }
-                String rawReadme = issueRepo.getRawReadme();
-                if(rawReadme == null){
-                    rawReadme = githubRepoInfoScrapper.fetchReadme(issueRepo.getRepoName());
-                    issueRepo.setRawReadme(rawReadme);
+                String rawReadme = issueRepo.rawReadme();
+                String repoSummary = issueRepo.aiSummary();
+                String repoStatus = issueRepo.aiSummaryStatus();
+                boolean dbNeedsUpdate = false;
+                if (rawReadme == null || rawReadme.isBlank()) {
+                    rawReadme = githubRepoInfoScrapper.fetchReadme(issue.getRepoName());
+                    dbNeedsUpdate = true;
                 }
-                if(issueRepo.getAiSummary()==null){
-                    String repoSummary = geminiClientService
-                            .summarizeRepository(issueRepo.getRepoName(), rawReadme);
-                    issueRepo.setAiSummary(repoSummary);
-                    issueRepo.setAiSummaryStatus("COMPLETED");
-                    scrappedRepoInfoRepository.save(issueRepo);
+                if ("PENDING".equals(repoStatus)) {
+                    repoSummary = geminiClientService.summarizeRepository(issue.getRepoName(), rawReadme);
+                    repoStatus = "COMPLETED";
+                    dbNeedsUpdate = true;
+                }
+                if (dbNeedsUpdate) {
+                    scrappedRepoInfoRepository.updateSummaryInfo(
+                            issue.getRepoName(),
+                            rawReadme,
+                            repoSummary,
+                            repoStatus
+                    );
                 }
                 String aiSummary = geminiClientService.summarizeIssue(
                         issue.getTitle(),
                         issue.getBody(),
                         issue.getRepoName(),
-                        issueRepo.getAiSummary()
+                        repoSummary
                 );
+
                 issue.setSummary(aiSummary);
                 githubIssuesRepository.save(issue);
                 return aiSummary;
-
             } finally {
                 redisTemplate.delete(lockKey);
             }
-        }
-        else {
+        } else {
             int retries = 0;
             int maxRetries = 12;
             while (retries < maxRetries) {
@@ -104,9 +114,7 @@ public class AISummarizationService {
                     Thread.currentThread().interrupt();
                     throw new RuntimeException("Polling interrupted");
                 }
-
                 GithubIssues refreshedIssue = githubIssuesRepository.findById(issueId).orElse(null);
-
                 if (refreshedIssue != null && refreshedIssue.getSummary() != null && !refreshedIssue.getSummary().isBlank()) {
                     return refreshedIssue.getSummary();
                 }
@@ -116,60 +124,73 @@ public class AISummarizationService {
         }
     }
 
-    @Scheduled(fixedDelay = 1800000) // 30 mins , PROD - 1800000, 30mins
+    @Scheduled(fixedDelay = 2700000) //DEV -1800000/30 mins , PROD - 2700000/45mins
     public void getRepoReadmeSummary(){
-        ScrapperMetrics metrics =  schedulerManagerService.getMetrics("repo-readme-summarizer");
-        if(metrics.getStatus().get().equals("PAUSED")){
+        ScrapperMetrics metrics = schedulerManagerService.getMetrics("repo-readme-summarizer");
+
+        if ("PAUSED".equals(metrics.getStatus().get())) {
             System.out.println("[JOB: getRepoReadmeSummary()] [PAUSED]");
             return;
         }
-        List<ScrappedRepoInfo> pendingRepos = scrappedRepoInfoRepository
-                .findTop10ByRawReadmeIsNotNullAndAiSummaryStatusAndRepoType("PENDING",
-                        "ENTERPRISE");
-        metrics.getStatus().set("RUNNING");
-        metrics.getTotal().set(10);
-        metrics.getPointsCostInCurrentCycle().set(0);
+        List<RepoReadmeDTO> pendingRepos = fetchPrioritizedRepos();
         if (pendingRepos.isEmpty()) {
+            System.out.println("[JOB: getRepoReadmeSummary()] [NOTHING TO PROCESS] [AUTOMATED STATUS UPDATE : PAUSED]");
+            metrics.getStatus().set("PAUSED");
             return;
         }
-        System.out.println("[JOB: getRepoReadmeSummary()] [Generating AI Summary for "+pendingRepos.size()+" ENTERPRISE repos]");
+
+        System.out.println("[JOB: getRepoReadmeSummary()] [Generating AI Summary for " + pendingRepos.size() + " prioritized repos]");
+        initializeMetrics(metrics, pendingRepos.size());
         int summaryCreated = 0;
-        for (ScrappedRepoInfo repo : pendingRepos) {
-            if(metrics.getStatus().get().equals("PAUSED")){
-                System.out.println("[JOB: getRepoReadmeSummary()] [PAUSED]");
-                scrappedRepoInfoRepository.saveAll(pendingRepos);
-                return;
-            }
-            try {
-                String safeReadme = sanitizeReadmeForLlm(repo.getRawReadme());
-                String aiSummary = geminiClientService
-                        .summarizeRepository(repo.getRepoName(), safeReadme);
-                if(aiSummary!=null && !aiSummary.isBlank()){
-                    repo.setAiSummary(aiSummary);
-                    repo.setAiSummaryStatus("COMPLETE");
-                    metrics.getProgress().addAndGet(1);
-                    metrics.getPointsCostInCurrentCycle().addAndGet(1);
+        try {
+            for (RepoReadmeDTO repo : pendingRepos) {
+                if ("PAUSED".equals(metrics.getStatus().get())) {
+                    System.out.println("[JOB: getRepoReadmeSummary()] [PAUSED MID-EXECUTION]");
+                    return;
+                }
+                boolean success = processSingleRepo(repo);
+                if (success) {
+                    recordSuccessMetrics(metrics);
                     summaryCreated++;
                 }
                 Thread.sleep(5000);
             }
-            catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                System.err.println("Cron job sleep interrupted.");
-                break;
-            }
-            catch (Exception e) {
-                repo.setAiSummaryStatus("FAILED");
-                System.err.println("[JOB: getRepoReadmeSummary()] [Failed to summarize Enterprise repo: " + repo.getRepoName() + " - " + e.getMessage()+"]");
-                return;
+            System.out.println("[JOB: getRepoReadmeSummary()] [" + summaryCreated + " Summaries created / " + pendingRepos.size() + " Repos processed]");
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            System.err.println("[JOB: getRepoReadmeSummary()] Cron job sleep interrupted.");
+        } finally {
+            if (!"PAUSED".equals(metrics.getStatus().get())) {
+                metrics.getStatus().set("IDLE");
             }
         }
-        metrics.getTotalPointsCost().addAndGet(summaryCreated);
-        System.out.println("[JOB: getRepoReadmeSummary()] ["+ summaryCreated+" Summary created /"+pendingRepos.size()+" ENTERPRISE repos]");
-        scrappedRepoInfoRepository.saveAll(pendingRepos);
-
     }
+    private List<RepoReadmeDTO> fetchPrioritizedRepos() {
 
+        // 1. Try to fill the batch with HOT repos
+        List<RepoReadmeDTO> prioritizedBatch = new ArrayList<>(scrappedRepoInfoRepository
+                .findTop10ByRawReadmeIsNotNullAndAiSummaryStatusAndActivityTemperature("PENDING", "HOT"));
+
+        // 2. If we need more to reach 10, pull WARM repos
+        if (prioritizedBatch.size() < 10) {
+            List<RepoReadmeDTO> warmRepos = scrappedRepoInfoRepository
+                    .findTop10ByRawReadmeIsNotNullAndAiSummaryStatusAndActivityTemperature("PENDING", "WARM");
+
+            int slotsRemaining = 10 - prioritizedBatch.size();
+            prioritizedBatch.addAll(warmRepos.stream().limit(slotsRemaining).toList());
+        }
+
+        // 3. If we STILL need more, pull COLD repos
+        if (prioritizedBatch.size() < 10) {
+            List<RepoReadmeDTO> coldRepos = scrappedRepoInfoRepository
+                    .findTop10ByRawReadmeIsNotNullAndAiSummaryStatusAndActivityTemperature("PENDING", "COLD");
+
+            int slotsRemaining = 10 - prioritizedBatch.size();
+            prioritizedBatch.addAll(coldRepos.stream().limit(slotsRemaining).toList());
+        }
+
+        return prioritizedBatch;
+    }
 
     public static String sanitizeReadmeForLlm(String rawReadme) {
         if (rawReadme == null || rawReadme.isBlank()) {
@@ -179,6 +200,35 @@ public class AISummarizationService {
             return rawReadme.substring(0, 14000);
         }
         return rawReadme;
+    }
+    private boolean processSingleRepo(RepoReadmeDTO repo) {
+        try {
+            String safeReadme = sanitizeReadmeForLlm(repo.rawReadme());
+            String aiSummary = geminiClientService.summarizeRepository(repo.repoName(), safeReadme);
+
+            if (aiSummary != null && !aiSummary.isBlank()) {
+                scrappedRepoInfoRepository.updateRepoSummaryStatus(repo.repoName(), aiSummary, "COMPLETED");
+                return true;
+            } else {
+                scrappedRepoInfoRepository.updateRepoSummaryStatus(repo.repoName(), null, "FAILED");
+                return false;
+            }
+        } catch (Exception e) {
+            System.err.println("[JOB: getRepoReadmeSummary()] [Failed to summarize repo: " + repo.repoName() + " - " + e.getMessage() + "]");
+            scrappedRepoInfoRepository.updateRepoSummaryStatus(repo.repoName(), null, "FAILED");
+            return false;
+        }
+    }
+    private void initializeMetrics(ScrapperMetrics metrics, int totalJobs) {
+        metrics.getStatus().set("RUNNING");
+        metrics.getTotal().set(totalJobs);
+        metrics.getProgress().set(0);
+        metrics.getPointsCostInCurrentCycle().set(0);
+    }
+    private void recordSuccessMetrics(ScrapperMetrics metrics) {
+        metrics.getProgress().incrementAndGet();
+        metrics.getPointsCostInCurrentCycle().incrementAndGet();
+        metrics.getTotalPointsCost().incrementAndGet();
     }
 
 }

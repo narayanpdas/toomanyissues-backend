@@ -14,10 +14,7 @@ import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.mongodb.core.MongoTemplate;
-import org.springframework.data.mongodb.core.query.Criteria;
-import org.springframework.data.mongodb.core.query.Query;
-import org.springframework.data.mongodb.core.query.TextCriteria;
-import org.springframework.data.mongodb.core.query.TextQuery;
+import org.springframework.data.mongodb.core.query.*;
 import org.springframework.stereotype.Service;
 
 
@@ -86,6 +83,7 @@ public class GithubIssuesService {
 
         query.skip((long) page * size);
         query.limit(size);
+        query.collation(Collation.of("en").strength(2));
         List<GithubIssues> issues = mongoTemplate.find(query, GithubIssues.class);
         long totalCount = mongoTemplate.count(Query.of(query).skip(-1).limit(-1), GithubIssues.class);
         PageRequest pageRequest = PageRequest.of(page, size);
@@ -115,9 +113,9 @@ public class GithubIssuesService {
             List<String> lowerCaseLanguages = primaryLanguages.stream().map(String::toLowerCase).toList();
             query.addCriteria(Criteria.where("primaryLanguage").in(lowerCaseLanguages));
         }
-
         query.skip((long) page * size);
         query.limit(size);
+        query.collation(Collation.of("en").strength(2));
         List<GithubIssues> issues = mongoTemplate.find(query, GithubIssues.class);
         long totalCount = mongoTemplate.count(Query.of(query).skip(-1).limit(-1), GithubIssues.class);
         PageRequest pageRequest = PageRequest.of(page, size);
@@ -137,7 +135,4 @@ public class GithubIssuesService {
             githubIssuesRepository.save(p);
         }
     }
-
-
-
 }

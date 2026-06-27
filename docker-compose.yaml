@@ -1,0 +1,59 @@
+version: '3.8'
+services:
+  toomany-issues:
+    image: narayan5432/toomanyissues-api:latest
+    container_name: toomanyissues-api
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/toomanyissues-postgres-db
+      - SPRING_DATASOURCE_USERNAME=admin
+      - SPRING_DATASOURCE_PASSWORD=password123
+      - SPRING_MONGODB_URI=mongodb://mongo:27017/githubIssues
+      - APP_GITHUBPAT=${APP_GITHUBPAT}
+      - APP_JWTSECRETKEY=${APP_JWTSECRETKEY}
+      - APP_JWTTOKENTIMEOUT=${APP_JWTTOKENTIMEOUT}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - APP_CORS_ALLOWED_ORIGINS=${APP_CORS_ALLOWED_ORIGINS}
+      - SPRING_DATA_REDIS_HOST=redis
+      - SPRING_DATA_REDIS_PORT=6379
+      - SPRING_DATA_REDIS_PASSWORD=${REDIS_PASSWORD}
+      - INTERNAL_EXPORT_KEY=${INTERNAL_EXPORT_KEY}
+    depends_on:
+      - redis
+      - postgres
+      - mongo
+  postgres:
+    image: postgres:latest
+    container_name: toomanyissues-postgres-db
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password123
+      POSTGRES_DB: toomanyissues-postgres-db
+      PGDATA: /var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+  mongo:
+    image: mongo:latest
+    container_name: toomanyissues-mongo-db
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodata:/data/db
+  redis:
+    image: redis:latest
+    container_name: toomanyissues-redis-server
+    command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes
+    ports:
+      - "6379:6379"
+networks:
+  toomanyissues-network:
+    driver: bridge
+volumes:
+  postgres-data:
+  mongodata:
+  redis-data:
+    driver: local

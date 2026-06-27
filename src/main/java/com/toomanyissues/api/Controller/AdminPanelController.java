@@ -161,28 +161,18 @@ public class AdminPanelController {
         if (metrics == null) {
             return ResponseEntity.notFound().build();
         }
+        String currentStatus = metrics.getStatus().get();
         if (action.equals("PAUSED")) {
             metrics.getStatus().set("PAUSED");
-
-        } else if (action.equals("RUNNING")) {
-            if (metrics.getStatus().get().equals("RUNNING")) {
+            return ResponseEntity.ok().build();
+        }
+        if (action.equals("RUNNING")) {
+            if (currentStatus.equals("RUNNING")) {
                 return ResponseEntity.ok().build();
             }
-            metrics.getStatus().set("RUNNING");
-
-            CompletableFuture.runAsync(() -> {
-                switch (id) {
-                    case "issue-scraper-enterprise":
-                        githubIssueScrapperService.scrapBigRepoIssues();
-                        break;
-                    case "issue-scraper-indie":
-                        githubIssueScrapperService.scrapSmallRepoIssues();
-                        break;
-                    case "repo-scraper":
-
-                        break;
-                }
-            });
+            if (currentStatus.equals("PAUSED")) {
+                metrics.getStatus().set("IDLE");
+            }
         }
         return ResponseEntity.ok().build();
     }

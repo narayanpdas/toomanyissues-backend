@@ -6,12 +6,11 @@ import com.toomanyissues.api.Model.ScrapperMetrics;
 import com.toomanyissues.api.Service.DTOs.GithubIssueResponseDTOs.GraphqlIssueNode;
 import com.toomanyissues.api.Service.DTOs.GithubGraphql.GraphqlAliasResponse;
 import com.toomanyissues.api.Service.DTOs.GithubGraphql.AliasRepository;
+import com.toomanyissues.api.Service.DTOs.RedisDTOs.ScrappedRepoMetadata;
 import com.toomanyissues.api.Service.DTOs.RepoInfoScrapperDTOs.GithubRateLimitResponse;
 import com.toomanyissues.api.repository.GithubIssuesRepository;
-import com.toomanyissues.api.repository.ScrappedRepoInfoRepository;
+import org.jspecify.annotations.NonNull;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.PageRequest;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
@@ -31,20 +30,20 @@ public class GithubIssueScrapperService {
 
     private final RestClient restClient;
     private final GithubIssuesRepository githubIssuesRepository;
-    private final ScrappedRepoInfoRepository scrappedRepoInfoRepository;
+    private final RedisService redisService;
     private final SchedulerManagerService schedulerManagerService;
     private final Random random = new Random();
     private final ExecutorService githubExecutor = Executors.newFixedThreadPool(3);
 
     public GithubIssueScrapperService(
             GithubIssuesRepository githubIssuesRepository,
-            ScrappedRepoInfoRepository scrappedRepoInfoRepository,
             SchedulerManagerService schedulerManagerService,
+            RedisService redisService,
             @Value("${app.githubPAT}") String appGithubPat
     ) {
         this.githubIssuesRepository = githubIssuesRepository;
-        this.scrappedRepoInfoRepository = scrappedRepoInfoRepository;
         this.schedulerManagerService = schedulerManagerService;
+        this.redisService = redisService;
         this.restClient = RestClient.builder()
                 .baseUrl("https://api.github.com")
                 .defaultHeader("User-Agent", "Mr-Aggregator")
@@ -54,70 +53,100 @@ public class GithubIssueScrapperService {
     }
 
     @Scheduled(fixedDelay = 3600000) // 1 hour
-    public void scrapBigRepoIssues() {
-        processRepositoriesInChunks("ENTERPRISE", "issue-scraper-enterprise");
+    public void scrapHotRepoIssues() {
+        processRepositoriesInChunks("HOT", "issue-scraper-hot");
     }
-
-    @Scheduled(fixedDelay = 7200000, initialDelay = 900000) // 2 hours // Initial delay of 15 mins
-    public void scrapSmallRepoIssues() {
-        processRepositoriesInChunks("INDIE", "issue-scraper-indie");
+    @Scheduled(fixedDelay = 14400000, initialDelay = 900000) // 4 hours // Initial delay of 15 mins
+    public void scrapWarmRepoIssues() {
+        processRepositoriesInChunks("WARM", "issue-scraper-warm");
     }
-
+    @Scheduled(fixedDelay = 86400000, initialDelay = 1800000) // 24 hours // Initial delay of 30 mins
+    public void scrapColdRepoIssues() {
+        processRepositoriesInChunks("COLD", "issue-scraper-cold");
+    }
     // ==========================================
-    // ORCHESTRATOR METHOD (Reads like a story)
+    // ORCHESTRATOR METHOD
     // ==========================================
-    private void processRepositoriesInChunks(String repoType, String metricKey) {
+    private void processRepositoriesInChunks(String repoTemperature, String metricKey) {
         ScrapperMetrics metrics = schedulerManagerService.getMetrics(metricKey);
 
-        if (metrics.getStatus().get().equals("PAUSED")) {
+        if ("PAUSED".equals(metrics.getStatus().get())) {
             System.out.println("[JOB: " + metricKey + "] [PAUSED]");
             return;
         }
+        try {
+            int initialRateLimit = fetchCurrentRateLimit();
 
-        int initialRateLimit = fetchCurrentRateLimit();
-        initializeMetrics(metrics, repoType, metricKey);
+            // 1. Fetch exactly which IDs belong to this temperature bucket right now
+            List<Long> rawRepoIds = redisService.getRepoIdsByTemperature(repoTemperature);
 
-        int pageNumber = 0;
-        int pageSize = 100;
-        Page<ScrappedRepoInfo> repoPage = scrappedRepoInfoRepository.findByRepoType(repoType, PageRequest.of(pageNumber, pageSize));
+            // Convert Long IDs to Strings for the Redis Hash fetch
+            List<String> repoIds = rawRepoIds.stream().map(String::valueOf).toList();
 
-        while (repoPage.hasNext()) {
-            List<ScrappedRepoInfo> repoChunkList = repoPage.getContent();
-            List<ScrappedRepoInfo> reposToScrape = filterEligibleRepos(repoChunkList); // The Bouncer
+            initializeMetrics(metrics, repoTemperature, metricKey, repoIds.size());
+
+            // 2. Fetch the actual Hash Data from Redis in a single Pipelined Batch
+            List<Map<String, String>> repoDataHashes = redisService.getBatchRepoData(repoIds);
+
+            // 3. Map the raw Redis Hashes into our clean RepoContext DTOs
+            List<ScrappedRepoMetadata> reposToScrape = getRepoContexts(repoIds, repoDataHashes);
 
             if (reposToScrape.isEmpty()) {
-                metrics.getProgress().addAndGet(repoChunkList.size());
-                repoPage = scrappedRepoInfoRepository.findByRepoType(repoType, PageRequest.of(++pageNumber, pageSize));
-                continue;
-            }
-
-            boolean continueProcessing = executeAsyncChunks(reposToScrape, metrics, metricKey);
-            if (!continueProcessing) {
                 finalizeMetrics(metrics, initialRateLimit);
                 return;
             }
 
-            metrics.getProgress().addAndGet(repoChunkList.size());
-            sleepWithJitter();
-            repoPage = scrappedRepoInfoRepository.findByRepoType(repoType, PageRequest.of(++pageNumber, pageSize));
-        }
+            // 4. Send the context list into the Async Executor
+            boolean continueProcessing = executeAsyncChunks(reposToScrape, metrics, metricKey);
 
-        finalizeMetrics(metrics, initialRateLimit);
+            if (continueProcessing) {
+                metrics.getProgress().addAndGet(reposToScrape.size());
+            }
+
+            finalizeMetrics(metrics, initialRateLimit);
+            if ("PAUSED".equals(metrics.getStatus().get())) {
+                System.out.println("[JOB: " + metricKey + "] [PAUSED]");
+                return;
+            }
+        }
+        catch (Exception e) {
+            System.out.println("[JOB: " + metricKey + "] [FAILED]"+"\nERROR: "+e.getMessage());
+        }
+    }
+
+    private static @NonNull List<ScrappedRepoMetadata> getRepoContexts(List<String> repoIds,
+                                                                       List<Map<String, String>> repoDataHashes) {
+        List<ScrappedRepoMetadata> reposToScrape = new ArrayList<>();
+        for (int i = 0; i < repoIds.size(); i++) {
+            Map<String, String> data = repoDataHashes.get(i);
+            if (data != null && !data.isEmpty()) {
+                reposToScrape.add(new ScrappedRepoMetadata(
+                        Long.parseLong(repoIds.get(i)),
+                        data.get("repoOwnerName"),
+                        data.get("repoName"),
+                        data.get("repoUrl"),
+                        data.get("repoType"),
+                        data.get("primaryLanguage"),
+                        Instant.parse(data.get("lastIssueSync")),
+                        data.get("activityTemperature")
+                ));
+            }
+        }
+        return reposToScrape;
     }
 
     // ==========================================
     // ASYNC EXECUTION
     // ==========================================
-    private boolean executeAsyncChunks(List<ScrappedRepoInfo> reposToScrape, ScrapperMetrics metrics, String metricKey) {
-        List<List<ScrappedRepoInfo>> graphqlChunks = partitionList(reposToScrape, 5);
+    private boolean executeAsyncChunks(List<ScrappedRepoMetadata> reposToScrape, ScrapperMetrics metrics, String metricKey) {
+        List<List<ScrappedRepoMetadata>> graphqlChunks = partitionList(reposToScrape, 5);
         List<CompletableFuture<Void>> futures = new ArrayList<>();
 
-        for (List<ScrappedRepoInfo> chunk : graphqlChunks) {
+        for (List<ScrappedRepoMetadata> chunk : graphqlChunks) {
             if (metrics.getStatus().get().equals("PAUSED")) {
                 System.out.println("[JOB: " + metricKey + "] [Safely Processed and PAUSED]");
                 return false;
             }
-
             CompletableFuture<Void> future = CompletableFuture.runAsync(
                     () -> executeGraphqlSearch(chunk, metrics),
                     githubExecutor
@@ -135,28 +164,9 @@ public class GithubIssueScrapperService {
     }
 
     // ==========================================
-    // THE BOUNCER (Rate Limit Optimization)
-    // ==========================================
-    private List<ScrappedRepoInfo> filterEligibleRepos(List<ScrappedRepoInfo> repoChunkList) {
-        List<ScrappedRepoInfo> reposToScrape = new ArrayList<>();
-        Instant now = Instant.now();
-
-        for (ScrappedRepoInfo repo : repoChunkList) {
-            Instant lastSync = repo.getLastIssueSync() != null ? repo.getLastIssueSync() : now.minus(7, ChronoUnit.DAYS);
-            long hoursSinceLastSync = ChronoUnit.HOURS.between(lastSync, now);
-            String temp = repo.getActivityTemperature() != null ? repo.getActivityTemperature() : "WARM";
-
-            if (temp.equals("HOT") && hoursSinceLastSync >= 1) reposToScrape.add(repo);
-            else if (temp.equals("WARM") && hoursSinceLastSync >= 4) reposToScrape.add(repo);
-            else if (temp.equals("COLD") && hoursSinceLastSync >= 24) reposToScrape.add(repo);
-        }
-        return reposToScrape;
-    }
-
-    // ==========================================
     // GRAPHQL PIPELINE
     // ==========================================
-    private void executeGraphqlSearch(List<ScrappedRepoInfo> repos, ScrapperMetrics metrics) {
+    private void executeGraphqlSearch(List<ScrappedRepoMetadata> repos, ScrapperMetrics metrics) {
         long startTime = System.currentTimeMillis();
         try {
             String graphqlQuery = buildGraphqlQuery(repos); // The Time Clamp
@@ -179,16 +189,16 @@ public class GithubIssueScrapperService {
         }
     }
 
-    private String buildGraphqlQuery(List<ScrappedRepoInfo> repos) {
+    private String buildGraphqlQuery(List<ScrappedRepoMetadata> repos) {
         StringBuilder queryBuilder = new StringBuilder("query {\n");
         Instant now = Instant.now();
 
         for (int i = 0; i < repos.size(); i++) {
-            ScrappedRepoInfo repo = repos.get(i);
-            String owner = repo.getRepoOwnerName();
-            String name = repo.getRepoName().contains("/") ? repo.getRepoName().split("/")[1] : repo.getRepoName();
+            ScrappedRepoMetadata repo = repos.get(i);
+            String owner = repo.repoOwnerName();
+            String name = repo.repoName().contains("/") ? repo.repoName().split("/")[1] : repo.repoName();
 
-            Instant lastSync = repo.getLastIssueSync() != null ? repo.getLastIssueSync() : now.minus(7, ChronoUnit.DAYS);
+            Instant lastSync = repo.lastIssueSync() != null ? repo.lastIssueSync() : now.minus(7, ChronoUnit.DAYS);
             if (lastSync.isBefore(now.minus(7, ChronoUnit.DAYS))) {
                 lastSync = now.minus(7, ChronoUnit.DAYS);
             }
@@ -203,12 +213,15 @@ public class GithubIssueScrapperService {
         return queryBuilder.toString();
     }
 
-    private void processGraphqlResponse(List<ScrappedRepoInfo> repos, GraphqlAliasResponse responses, ScrapperMetrics metrics, long startTime) {
+    private void processGraphqlResponse(List<ScrappedRepoMetadata> repos,
+                                        GraphqlAliasResponse responses,
+                                        ScrapperMetrics metrics,
+                                        long startTime
+    ) {
         List<GithubIssues> issuesToSave = new ArrayList<>();
-        List<ScrappedRepoInfo> reposToUpdate = new ArrayList<>();
 
         for (int i = 0; i < repos.size(); i++) {
-            ScrappedRepoInfo localRepoData = repos.get(i);
+            ScrappedRepoMetadata localRepoData = repos.get(i);
             AliasRepository aliasRepo = responses.data().get("repo" + i);
             int newIssuesFound = 0;
 
@@ -216,9 +229,9 @@ public class GithubIssueScrapperService {
                 newIssuesFound = aliasRepo.issues().nodes().size();
                 for (GraphqlIssueNode node : aliasRepo.issues().nodes()) {
                     GithubIssues issue = new GithubIssues(node);
-                    issue.setRepoName(localRepoData.getRepoName());
-                    issue.setRepositoryUrl(localRepoData.getRepoUrl());
-                    issue.setPrimaryLanguage(localRepoData.getPrimaryLanguage());
+                    issue.setRepoName(localRepoData.repoName());
+                    issue.setRepositoryUrl(localRepoData.repoUrl());
+                    issue.setPrimaryLanguage(localRepoData.primaryLanguage());
 
                     boolean hasLabels = issue.getLabels() != null && !issue.getLabels().isEmpty();
                     boolean hasValidTitle = issue.getTitle() != null && issue.getTitle().trim().length() > 8;
@@ -228,18 +241,24 @@ public class GithubIssueScrapperService {
                 }
             }
 
-
-            if (newIssuesFound >= 5) localRepoData.setActivityTemperature("HOT");
-            else if (newIssuesFound > 0) localRepoData.setActivityTemperature("WARM");
-            else localRepoData.setActivityTemperature("COLD");
-
-            localRepoData.setLastIssueSync(Instant.now());
-            reposToUpdate.add(localRepoData);
+            String repoTemp = "";
+            if (newIssuesFound >= 5) repoTemp = "HOT";
+            else if (newIssuesFound > 0) repoTemp = "WARM";
+            else repoTemp="COLD";
+            // UPDATE required for next pulling.
+            redisService.setRepoByTemperature(
+                    localRepoData.id().toString(),
+                    localRepoData.activityTemperature(),
+                    repoTemp
+            );
+            // UPDATE required for next push to SupaBase.
+            redisService.updateRepoTemperatureAndSyncTime(
+                    localRepoData.id().toString(),
+                    repoTemp,
+                    Instant.now().toString()
+            );
+            redisService.markRepoAsDirty(localRepoData.id().toString());
         }
-
-
-        if (!reposToUpdate.isEmpty()) scrappedRepoInfoRepository.saveAll(reposToUpdate);
-
         long executionTime = System.currentTimeMillis() - startTime;
         if (!issuesToSave.isEmpty()) {
             githubIssuesRepository.saveAll(issuesToSave);
@@ -261,11 +280,11 @@ public class GithubIssueScrapperService {
         return rate != null ? rate.resources().graphql().remaining() : 0;
     }
 
-    private void initializeMetrics(ScrapperMetrics metrics, String repoType, String metricKey) {
+    private void initializeMetrics(ScrapperMetrics metrics, String repoTemperature, String metricKey,int total) {
         metrics.getStatus().set("RUNNING");
         metrics.getPointsCostInCurrentCycle().set(0);
         metrics.getProgress().set(0);
-        metrics.getTotal().set((int) scrappedRepoInfoRepository.countByRepoType(repoType));
+        metrics.getTotal().set(total);
         System.out.println("[JOB: " + metricKey + "] [STARTED]");
     }
 

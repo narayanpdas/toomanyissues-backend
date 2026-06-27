@@ -12,7 +12,8 @@ import org.springframework.data.jpa.domain.support.AuditingEntityListener;
 
 import java.time.Instant;
 
-@Entity
+// TODO CHANGE THE NAME HERE
+@Entity(name="scrapped_repo_info")
 @Getter
 @Setter
 @AllArgsConstructor
@@ -44,7 +45,7 @@ public class ScrappedRepoInfo {
     @Column(name = "activity_temperature")
     private String activityTemperature = "WARM";
 
-    private Instant LastIssueSync;
+    private Instant lastIssueSync;
     @CreatedDate
     @Column(updatable = false)
     private Instant createdDate;
@@ -67,6 +68,6 @@ public class ScrappedRepoInfo {
             this.repoType = "INDIE";
         }
         this.pushedAt = Instant.parse(node.pushedAt());
-        this.LastIssueSync=Instant.EPOCH;
+        this.lastIssueSync =Instant.EPOCH;
     }
 }

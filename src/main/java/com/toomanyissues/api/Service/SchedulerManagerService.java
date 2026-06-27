@@ -20,16 +20,22 @@ public class SchedulerManagerService {
                 "Fetches top repositories by from 2008.",
                 "PAUSED"
         ));
-        scrapers.put("issue-scraper-indie", new ScrapperMetrics(
-                "issue-scraper-indie",
-                "GitHub Indie Issue Scraper",
-                "Finds Issues of Indie repos.",
+        scrapers.put("issue-scraper-hot", new ScrapperMetrics(
+                "issue-scraper-hot",
+                "GitHub hot Issue Scraper",
+                "Finds Issues of hot repos.",
                 defaultStatus
         ));
-        scrapers.put("issue-scraper-enterprise", new ScrapperMetrics(
-                "issue-scraper-enterprise",
-                "GitHub Enterprise Issue Scraper",
-                "Finds issues of Enterprise repos.",
+        scrapers.put("issue-scraper-warm", new ScrapperMetrics(
+                "issue-scraper-warm",
+                "GitHub warm Issue Scraper",
+                "Finds issues of warm repos.",
+                defaultStatus
+        ));
+        scrapers.put("issue-scraper-cold", new ScrapperMetrics(
+                "issue-scraper-cold",
+                "GitHub cold Issue Scraper",
+                "Finds issues of cold repos.",
                 defaultStatus
         ));
         scrapers.put("repo-readme-scrapper", new ScrapperMetrics(

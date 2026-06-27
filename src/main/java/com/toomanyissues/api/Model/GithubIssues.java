@@ -9,11 +9,11 @@ import lombok.*;
 import org.springframework.data.annotation.Id;
 import org.springframework.data.mongodb.core.index.CompoundIndex;
 import org.springframework.data.mongodb.core.index.CompoundIndexes;
+import org.springframework.data.mongodb.core.index.Indexed;
 import org.springframework.data.mongodb.core.index.TextIndexed;
 import org.springframework.data.mongodb.core.mapping.Document;
 
 import java.time.Instant;
-import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -29,9 +29,7 @@ import java.util.List;
 
 public class GithubIssues {
     @Id private String githubIssueId;
-    @TextIndexed(weight = 2)
-    private String title;
-    @TextIndexed
+    @TextIndexed(weight = 3) private String title;
     private String body;
     private String htmlUrl;
     private List<GithubUserInfo> assignees = new ArrayList<>();
@@ -41,13 +39,13 @@ public class GithubIssues {
     private GithubUserInfo user;
     private Integer comments;
     private String repositoryUrl;
-    private Instant scrapedAt;
+    @Indexed(name = "scraped_at_ttl_idx", expireAfter = "2d") private Instant scrapedAt;
     private Boolean isActive = Boolean.TRUE;
     private String primaryLanguage;
     private String summary=null;
 
     // Derived variables
-    private String repoName;
+    @TextIndexed(weight = 2) private String repoName;
     private String userName;
     private Integer assigneeCount;
 
@@ -65,7 +63,7 @@ public class GithubIssues {
         this.comments = githubIssueInfo.comments();
         this.repositoryUrl = githubIssueInfo.repository_url();
 
-        this.scrapedAt = Instant.parse(LocalDateTime.now().toString());
+        this.scrapedAt = Instant.now();
         String[] repositoryUrlComponents = githubIssueInfo.repository_url().split("/");
         this.repoName = repositoryUrlComponents[repositoryUrlComponents.length - 1];
         this.userName = githubIssueInfo.user().login();
